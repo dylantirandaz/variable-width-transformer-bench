@@ -51,7 +51,7 @@ def main() -> None:
         base_width=args.width,
         bottleneck_layer_ratio=args.bottleneck_layer_ratio,
         bottleneck_width_ratio=args.bottleneck_width_ratio,
-        quantize_to=args.heads,
+        quantize_to=width_quantum(args.heads, args.position_encoding),
         mlp_expansion=args.mlp_expansion,
         endpoint_correction=not args.disable_endpoint_correction,
     )
@@ -87,11 +87,21 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--eval-interval", type=int, default=0, help="Also estimate validation loss every N train steps.")
     parser.add_argument("--history-interval", type=int, default=1, help="Record train-curve history every N steps.")
     parser.add_argument("--val-fraction", type=float, default=0.10)
-    parser.add_argument("--lr", type=float, default=1e-3)
-    parser.add_argument("--weight-decay", type=float, default=0.05)
+    parser.add_argument("--lr", type=float, default=1e-2)
+    parser.add_argument("--adam-beta1", type=float, default=0.9)
+    parser.add_argument("--adam-beta2", type=float, default=0.95)
+    parser.add_argument("--adam-eps", type=float, default=1e-10)
+    parser.add_argument("--weight-decay", type=float, default=0.10)
+    parser.add_argument("--warmup-fraction", type=float, default=0.08)
+    parser.add_argument("--lr-decay-power", type=float, default=1.0)
+    parser.add_argument("--disable-lr-schedule", action="store_true")
     parser.add_argument("--grad-clip", type=float, default=1.0)
     parser.add_argument("--dropout", type=float, default=0.0)
     parser.add_argument("--mlp-expansion", type=int, default=4)
+    parser.add_argument("--position-encoding", default="rope", choices=["rope", "learned"])
+    parser.add_argument("--rope-base", type=float, default=10_000.0)
+    parser.add_argument("--init-std", type=float, default=0.02)
+    parser.add_argument("--disable-width-aware-init", action="store_true")
     parser.add_argument("--log-interval", type=int, default=25)
     parser.add_argument("--bottleneck-layer-ratio", type=float, default=0.75)
     parser.add_argument("--bottleneck-width-ratio", type=float, default=0.30)
@@ -141,6 +151,12 @@ def print_seed_protocol(seed: int) -> None:
     )
 
 
+def width_quantum(heads: int, position_encoding: str) -> int:
+    if position_encoding == "rope":
+        return heads * 2
+    return heads
+
+
 def run_one(
     name: str,
     schedule: WidthSchedule,
@@ -158,9 +174,19 @@ def run_one(
         heads=args.heads,
         dropout=args.dropout,
         mlp_expansion=args.mlp_expansion,
+        position_encoding=args.position_encoding,
+        rope_base=args.rope_base,
+        init_std=args.init_std,
+        width_aware_init=not args.disable_width_aware_init,
     ).to(device)
     params = count_parameters(model)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+    optimizer = torch.optim.AdamW(
+        model.parameters(),
+        lr=args.lr,
+        betas=(args.adam_beta1, args.adam_beta2),
+        eps=args.adam_eps,
+        weight_decay=args.weight_decay,
+    )
     batch_generator = torch.Generator().manual_seed(args.seed + 10_000)
 
     model.train()
@@ -172,6 +198,9 @@ def run_one(
     synchronize_device(device)
     start = time.perf_counter()
     for step in range(1, args.steps + 1):
+        lr = learning_rate_for_step(args, step)
+        for group in optimizer.param_groups:
+            group["lr"] = lr
         x, y = get_batch(train_data, args.batch_size, args.block_size, device, batch_generator)
         _, loss = model(x, y)
         optimizer.zero_grad(set_to_none=True)
@@ -197,6 +226,7 @@ def run_one(
                 "seconds": elapsed,
                 "train_loss": last_loss,
                 "tokens_per_sec": tokens_seen / elapsed,
+                "lr": lr,
             }
 
         if should_eval:
@@ -213,6 +243,7 @@ def run_one(
                     "seconds": elapsed,
                     "train_loss": last_loss,
                     "tokens_per_sec": tokens_seen / elapsed,
+                    "lr": lr,
                 }
             entry["val_loss"] = val_loss
             entry["val_ppl"] = math.exp(min(val_loss, 20.0))
@@ -243,6 +274,7 @@ def run_one(
                     "seconds": train_seconds,
                     "train_loss": last_loss,
                     "tokens_per_sec": tokens_seen / train_seconds,
+                    "lr": learning_rate_for_step(args, args.steps),
                     "val_loss": val_loss,
                     "val_ppl": math.exp(min(val_loss, 20.0)),
                 }
@@ -255,6 +287,7 @@ def run_one(
                 "seconds": train_seconds,
                 "train_loss": last_loss,
                 "tokens_per_sec": tokens_seen / train_seconds,
+                "lr": learning_rate_for_step(args, args.steps),
                 "val_loss": val_loss,
                 "val_ppl": math.exp(min(val_loss, 20.0)),
             }
@@ -296,6 +329,23 @@ def estimate_loss(
         losses.append(float(loss.item()))
     model.train()
     return sum(losses) / len(losses)
+
+
+def learning_rate_for_step(args: argparse.Namespace, step: int) -> float:
+    if args.disable_lr_schedule:
+        return args.lr
+    if not 0.0 <= args.warmup_fraction < 1.0:
+        raise ValueError("warmup_fraction must be in [0, 1)")
+    if args.lr_decay_power <= 0:
+        raise ValueError("lr_decay_power must be positive")
+
+    warmup_steps = int(args.steps * args.warmup_fraction)
+    if warmup_steps > 0 and step <= warmup_steps:
+        return args.lr * step / warmup_steps
+
+    decay_steps = max(args.steps - warmup_steps, 1)
+    progress = min(max((step - warmup_steps) / decay_steps, 0.0), 1.0)
+    return args.lr * ((1.0 - progress) ** args.lr_decay_power)
 
 
 @torch.no_grad()

@@ -23,7 +23,7 @@ def test_tiny_transformer_forward_and_generate_shapes() -> None:
         vocab_size=32,
         block_size=8,
         base_width=16,
-        widths=[24, 12, 24],
+        widths=[24, 16, 24],
         heads=4,
     )
     x = torch.randint(0, 32, (2, 8))
@@ -32,3 +32,32 @@ def test_tiny_transformer_forward_and_generate_shapes() -> None:
     assert loss is not None
     out = model.generate(x[:, :2], max_new_tokens=3, temperature=1.0, top_k=8)
     assert out.shape == (2, 5)
+
+
+def test_learned_position_encoding_allows_odd_head_dim() -> None:
+    model = TinyTransformerLM(
+        vocab_size=32,
+        block_size=8,
+        base_width=16,
+        widths=[24, 12, 24],
+        heads=4,
+        position_encoding="learned",
+    )
+    x = torch.randint(0, 32, (2, 8))
+    logits, _ = model(x)
+    assert logits.shape == (2, 8, 32)
+
+
+def test_rope_requires_even_head_dim() -> None:
+    try:
+        TinyTransformerLM(
+            vocab_size=32,
+            block_size=8,
+            base_width=16,
+            widths=[24, 12, 24],
+            heads=4,
+        )
+    except ValueError as exc:
+        assert "RoPE requires an even head_dim" in str(exc)
+    else:
+        raise AssertionError("expected odd RoPE head dimension to fail")

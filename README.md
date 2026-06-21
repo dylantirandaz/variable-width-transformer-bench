@@ -19,6 +19,12 @@ This repo implements a local byte-level language-model benchmark so the two
 architectures can train and generate side by side on a laptop. It is not a
 reproduction of the paper's DCLM-scale experiments.
 
+The benchmark keeps the paper-facing defaults that make sense at this scale:
+geometric X-shaped widths, the paper's `l* = 0.75L` and bottleneck ratio `0.3d`,
+RoPE positional encoding, SwiGLU blocks, bias-free linear projections,
+width-aware initialization, AdamW with `(0.9, 0.95)` betas, 0.1 weight decay,
+8% warmup, and power learning-rate decay.
+
 ## Setup
 
 ```bash
@@ -59,6 +65,7 @@ The script prints:
 - validation loss/perplexity and best recorded validation loss;
 - paired seed settings for model init, train batches, eval batches, and sampling;
 - per-step history in the JSON report for plotting learning curves;
+- scheduled learning rate in each history row;
 - side-by-side generated text from the same prompt.
 
 By default, the JSON report is written to `runs/last_run.json`.

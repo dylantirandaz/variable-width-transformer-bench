@@ -57,10 +57,20 @@ def resize_residual(
 
 
 class CausalSelfAttention(nn.Module):
-    def __init__(self, width: int, heads: int, block_size: int, dropout: float = 0.0) -> None:
+    def __init__(
+        self,
+        width: int,
+        heads: int,
+        block_size: int,
+        dropout: float = 0.0,
+        position_encoding: str = "rope",
+        rope_base: float = 10_000.0,
+    ) -> None:
         super().__init__()
         if width % heads != 0:
             raise ValueError(f"width {width} must be divisible by heads {heads}")
+        if position_encoding not in {"rope", "learned"}:
+            raise ValueError("position_encoding must be 'rope' or 'learned'")
         self.width = width
         self.heads = heads
         self.head_dim = width // heads
@@ -68,6 +78,7 @@ class CausalSelfAttention(nn.Module):
         self.proj = nn.Linear(width, width, bias=False)
         self.attn_drop = nn.Dropout(dropout)
         self.resid_drop = nn.Dropout(dropout)
+        self.rope = RotaryEmbedding(self.head_dim, rope_base) if position_encoding == "rope" else None
         mask = torch.tril(torch.ones(block_size, block_size, dtype=torch.bool))
         self.register_buffer("mask", mask.view(1, 1, block_size, block_size), persistent=False)
 
@@ -79,6 +90,8 @@ class CausalSelfAttention(nn.Module):
         q = q.transpose(1, 2)
         k = k.transpose(1, 2)
         v = v.transpose(1, 2)
+        if self.rope is not None:
+            q, k = self.rope(q, k)
 
         att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(self.head_dim))
         att = att.masked_fill(~self.mask[:, :, :steps, :steps], torch.finfo(att.dtype).min)
@@ -87,6 +100,34 @@ class CausalSelfAttention(nn.Module):
         y = att @ v
         y = y.transpose(1, 2).contiguous().view(batch, steps, width)
         return self.resid_drop(self.proj(y))
+
+
+class RotaryEmbedding(nn.Module):
+    """Rotary position embedding for per-layer attention head dimensions."""
+
+    def __init__(self, head_dim: int, base: float = 10_000.0) -> None:
+        super().__init__()
+        if head_dim % 2 != 0:
+            raise ValueError(f"RoPE requires an even head_dim, got {head_dim}")
+        inv_freq = 1.0 / (base ** (torch.arange(0, head_dim, 2).float() / head_dim))
+        self.register_buffer("inv_freq", inv_freq, persistent=False)
+
+    def forward(self, q: torch.Tensor, k: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        steps = q.shape[-2]
+        positions = torch.arange(steps, device=q.device, dtype=self.inv_freq.dtype)
+        freqs = torch.outer(positions, self.inv_freq.to(device=q.device))
+        cos = freqs.cos().to(dtype=q.dtype)[None, None, :, :]
+        sin = freqs.sin().to(dtype=q.dtype)[None, None, :, :]
+        return self._apply_rotary(q, cos, sin), self._apply_rotary(k, cos, sin)
+
+    @staticmethod
+    def _apply_rotary(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
+        even = x[..., 0::2]
+        odd = x[..., 1::2]
+        out = torch.empty_like(x)
+        out[..., 0::2] = even * cos - odd * sin
+        out[..., 1::2] = even * sin + odd * cos
+        return out
 
 
 class SwiGLU(nn.Module):
@@ -110,11 +151,13 @@ class TransformerBlock(nn.Module):
         block_size: int,
         dropout: float = 0.0,
         mlp_expansion: int = 4,
+        position_encoding: str = "rope",
+        rope_base: float = 10_000.0,
     ) -> None:
         super().__init__()
         self.width = width
         self.ln_1 = nn.LayerNorm(width)
-        self.attn = CausalSelfAttention(width, heads, block_size, dropout)
+        self.attn = CausalSelfAttention(width, heads, block_size, dropout, position_encoding, rope_base)
         self.ln_2 = nn.LayerNorm(width)
         self.mlp = SwiGLU(width, mlp_expansion, dropout)
 
@@ -136,10 +179,16 @@ class TinyTransformerLM(nn.Module):
         heads: int,
         dropout: float = 0.0,
         mlp_expansion: int = 4,
+        position_encoding: str = "rope",
+        rope_base: float = 10_000.0,
+        init_std: float = 0.02,
+        width_aware_init: bool = True,
     ) -> None:
         super().__init__()
         if not widths:
             raise ValueError("widths must be non-empty")
+        if position_encoding not in {"rope", "learned"}:
+            raise ValueError("position_encoding must be 'rope' or 'learned'")
         if base_width % heads != 0:
             raise ValueError(f"base_width {base_width} must be divisible by heads {heads}")
         for width in widths:
@@ -149,8 +198,13 @@ class TinyTransformerLM(nn.Module):
         self.block_size = block_size
         self.base_width = base_width
         self.widths = list(widths)
+        self.position_encoding = position_encoding
+        self.init_std = init_std
+        self.width_aware_init = width_aware_init
         self.token_embedding = nn.Embedding(vocab_size, base_width)
-        self.position_embedding = nn.Embedding(block_size, base_width)
+        self.position_embedding = (
+            nn.Embedding(block_size, base_width) if position_encoding == "learned" else None
+        )
         self.drop = nn.Dropout(dropout)
         self.blocks = nn.ModuleList(
             [
@@ -160,17 +214,30 @@ class TinyTransformerLM(nn.Module):
                     block_size=block_size,
                     dropout=dropout,
                     mlp_expansion=mlp_expansion,
+                    position_encoding=position_encoding,
+                    rope_base=rope_base,
                 )
                 for width in widths
             ]
         )
         self.ln_f = nn.LayerNorm(widths[-1])
         self.lm_head = nn.Linear(base_width, vocab_size, bias=False)
-        self.apply(self._init_weights)
+        self._init_model_weights()
 
-    def _init_weights(self, module: nn.Module) -> None:
+    def _init_module(self, module: nn.Module, std: float) -> None:
         if isinstance(module, (nn.Linear, nn.Embedding)):
-            nn.init.normal_(module.weight, mean=0.0, std=0.02)
+            nn.init.normal_(module.weight, mean=0.0, std=std)
+
+    def _init_model_weights(self) -> None:
+        self._init_module(self.token_embedding, self.init_std)
+        if self.position_embedding is not None:
+            self._init_module(self.position_embedding, self.init_std)
+        for width, block in zip(self.widths, self.blocks):
+            std = self.init_std
+            if self.width_aware_init:
+                std *= math.sqrt(self.base_width / width)
+            block.apply(lambda module, std=std: self._init_module(module, std))
+        self._init_module(self.lm_head, self.init_std)
 
     def forward(
         self,
@@ -181,8 +248,10 @@ class TinyTransformerLM(nn.Module):
         if steps > self.block_size:
             raise ValueError(f"sequence length {steps} exceeds block_size {self.block_size}")
 
-        positions = torch.arange(steps, device=input_ids.device)
-        x = self.token_embedding(input_ids) + self.position_embedding(positions)[None, :, :]
+        x = self.token_embedding(input_ids)
+        if self.position_embedding is not None:
+            positions = torch.arange(steps, device=input_ids.device)
+            x = x + self.position_embedding(positions)[None, :, :]
         x = self.drop(x)
         histories = [x]
 
