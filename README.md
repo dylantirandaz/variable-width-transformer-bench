@@ -46,8 +46,12 @@ The script prints:
 - parameter counts;
 - average layer width and `sum(width^2)` proxies;
 - train throughput;
-- validation loss/perplexity;
+- validation loss/perplexity and best recorded validation loss;
+- paired seed settings for model init, train batches, eval batches, and sampling;
+- per-step history in the JSON report for plotting learning curves;
 - side-by-side generated text from the same prompt.
+
+By default, the JSON report is written to `runs/last_run.json`.
 
 ## Larger Local Run
 
@@ -62,11 +66,51 @@ PYTHONPATH=src python -m vwt_bench.benchmark \
   --generate-tokens 240
 ```
 
-Use your own UTF-8 text file with:
+The default corpus in `data/tiny_corpus.txt` is the *White Nights* text used by
+this benchmark. Use your own UTF-8 text file with:
 
 ```bash
 PYTHONPATH=src python -m vwt_bench.benchmark --data-path /path/to/text.txt
 ```
+
+For validation-loss checkpoints during training, add `--eval-interval`:
+
+```bash
+PYTHONPATH=src python -m vwt_bench.benchmark \
+  --steps 500 \
+  --eval-interval 100 \
+  --history-interval 5
+```
+
+The default corpus is small, so bundled results should be treated as a local
+comparison rather than a scaling claim. Use a larger corpus and multiple seeds
+before making a performance claim.
+
+## Blog and Animation Artifacts
+
+After running the benchmark, generate a Markdown blog draft, static SVG charts,
+animated SVG charts, and a self-contained HTML comparison page:
+
+```bash
+make artifacts
+```
+
+Equivalent command:
+
+```bash
+PYTHONPATH=src python scripts/build_artifacts.py \
+  --report runs/last_run.json \
+  --out-dir runs/artifacts
+```
+
+Generated files:
+
+- `runs/artifacts/comparison_blog.md`
+- `runs/artifacts/width_schedule.svg`
+- `runs/artifacts/widths_animation.svg`
+- `runs/artifacts/loss_curve.svg`
+- `runs/artifacts/loss_animation.svg`
+- `runs/artifacts/comparison.html`
 
 ## Tests
 
