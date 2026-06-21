@@ -64,7 +64,9 @@ The script prints:
 By default, the JSON report is written to `runs/last_run.json`.
 
 The default corpus in `data/tiny_corpus.txt` is the *White Nights* text used by
-this benchmark. Use your own UTF-8 text file with:
+this benchmark. It is soft-wrapped for readability; the default loader unwraps
+single line breaks and preserves blank-line paragraph breaks before byte
+tokenization. Use your own UTF-8 text file with:
 
 ```bash
 PYTHONPATH=src python -m vwt_bench.benchmark --data-path /path/to/text.txt

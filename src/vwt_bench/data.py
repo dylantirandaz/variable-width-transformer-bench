@@ -22,10 +22,31 @@ def decode(token_ids: list[int]) -> str:
 
 def load_bytes(path: Optional[str] = None) -> torch.Tensor:
     source = Path(path) if path else DEFAULT_CORPUS
-    data = source.read_bytes()
+    if path:
+        data = source.read_bytes()
+    else:
+        text = _unwrap_soft_line_breaks(source.read_text(encoding="utf-8"))
+        data = text.encode("utf-8")
     if len(data) < 128:
         raise ValueError(f"{source} is too small for a language-model benchmark")
     return torch.tensor(list(data), dtype=torch.long)
+
+
+def _unwrap_soft_line_breaks(text: str) -> str:
+    """Remove editor wrapping from the bundled corpus, keeping paragraphs."""
+
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    had_final_newline = text.endswith("\n")
+    paragraphs = text.strip("\n").split("\n\n")
+    unwrapped = []
+    for paragraph in paragraphs:
+        lines = [line.strip() for line in paragraph.split("\n") if line.strip()]
+        if lines:
+            unwrapped.append(" ".join(lines))
+    result = "\n\n".join(unwrapped)
+    if had_final_newline:
+        result += "\n"
+    return result
 
 
 def train_val_split(data: torch.Tensor, val_fraction: float = 0.10) -> Tuple[torch.Tensor, torch.Tensor]:
