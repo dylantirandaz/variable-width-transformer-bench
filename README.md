@@ -76,32 +76,6 @@ The default corpus is small, so bundled results should be treated as a local
 comparison rather than a scaling claim. Use a larger corpus and multiple seeds
 before making a performance claim.
 
-## Blog and Animation Artifacts
-
-After running the benchmark, generate a Markdown blog draft, static SVG charts,
-animated SVG charts, and a self-contained HTML comparison page:
-
-```bash
-make artifacts
-```
-
-Equivalent command:
-
-```bash
-PYTHONPATH=src python scripts/build_artifacts.py \
-  --report runs/last_run.json \
-  --out-dir runs/artifacts
-```
-
-Generated files:
-
-- `runs/artifacts/comparison_blog.md`
-- `runs/artifacts/width_schedule.svg`
-- `runs/artifacts/widths_animation.svg`
-- `runs/artifacts/loss_curve.svg`
-- `runs/artifacts/loss_animation.svg`
-- `runs/artifacts/comparison.html`
-
 ## Tests
 
 ```bash
