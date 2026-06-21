@@ -108,6 +108,30 @@ The paper's published experiments use DCLM-scale data, 4096-token sequences,
 repo follows the architecture and measurement methodology locally; it is not a
 drop-in replacement for that compute budget.
 
+## Modal GPU Runs
+
+For larger GPU-backed runs without changing the benchmark code, use Modal:
+
+```bash
+make setup-modal
+make modal-replicated
+```
+
+For a GPU shape sweep:
+
+```bash
+make modal-shape-sweep
+```
+
+The Modal launcher is [scripts/modal_benchmark.py](scripts/modal_benchmark.py).
+It uses an A100 function by default, writes reports to a persistent Modal Volume
+named `vwt-bench-runs`, and generates artifacts beside the report. Download a
+report with Modal's volume CLI, for example:
+
+```bash
+.venv/bin/modal volume get vwt-bench-runs replicated.json runs/modal_replicated.json
+```
+
 ## Tests
 
 ```bash

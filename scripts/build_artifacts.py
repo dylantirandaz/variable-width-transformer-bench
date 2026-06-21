@@ -40,6 +40,7 @@ def build_artifacts(report_path: Path, out_dir: Path, title: str = DEFAULT_TITLE
     report_path = Path(report_path)
     out_dir = Path(out_dir)
     report = json.loads(report_path.read_text(encoding="utf-8"))
+    report["_source_report_path"] = str(report_path)
     constant, variable = load_pair(report)
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -62,13 +63,109 @@ def build_artifacts(report_path: Path, out_dir: Path, title: str = DEFAULT_TITLE
 
 
 def load_pair(report: Mapping[str, Any]) -> Tuple[Mapping[str, Any], Mapping[str, Any]]:
+    summaries = report.get("summary") or []
+    if summaries:
+        by_summary = {str(result.get("name", "")).lower(): result for result in summaries}
+        variable_name = choose_variable_name(by_summary)
+        if "constant" in by_summary and variable_name:
+            representatives = representative_results(report)
+            aggregates = aggregate_results(report)
+            constant_summary = dict(aggregates.get("constant", {}))
+            constant_summary.update(by_summary["constant"])
+            variable_summary = dict(aggregates.get(variable_name, {}))
+            variable_summary.update(by_summary[variable_name])
+            return (
+                merge_summary_with_representative(normalize_summary_metrics(constant_summary), representatives.get("constant")),
+                merge_summary_with_representative(normalize_summary_metrics(variable_summary), representatives.get(variable_name)),
+            )
+
     results = report.get("results", [])
     by_name = {str(result.get("name", "")).lower(): result for result in results}
-    try:
-        return by_name["constant"], by_name["variable"]
-    except KeyError as exc:
+    variable_name = choose_variable_name(by_name)
+    if "constant" in by_name and variable_name:
+        return by_name["constant"], by_name[variable_name]
+    else:
         names = ", ".join(sorted(name for name in by_name if name)) or "none"
-        raise ValueError(f"report must contain constant and variable results; found {names}") from exc
+        raise ValueError(f"report must contain constant and variable results; found {names}")
+
+
+def choose_variable_name(results_by_name: Mapping[str, Any]) -> Optional[str]:
+    for name in ("variable", "variable_x"):
+        if name in results_by_name:
+            return name
+    for name in sorted(results_by_name):
+        if name.startswith("variable"):
+            return name
+    return None
+
+
+def representative_results(report: Mapping[str, Any]) -> Dict[str, Mapping[str, Any]]:
+    reps: Dict[str, Mapping[str, Any]] = {}
+    for result in report.get("results", []):
+        name = str(result.get("name", "")).lower()
+        reps.setdefault(name, result)
+    return reps
+
+
+def aggregate_results(report: Mapping[str, Any]) -> Dict[str, Mapping[str, Any]]:
+    grouped: Dict[str, List[Mapping[str, Any]]] = {}
+    for result in report.get("results", []):
+        name = str(result.get("name", "")).lower()
+        if name:
+            grouped.setdefault(name, []).append(result)
+
+    aggregate_fields = (
+        "final_train_loss",
+        "val_loss",
+        "val_ppl",
+        "best_val_loss",
+        "tokens_per_sec",
+    )
+    rows: Dict[str, Mapping[str, Any]] = {}
+    for name, group in grouped.items():
+        first = group[0]
+        row: Dict[str, Any] = {
+            "name": first.get("name", name),
+            "runs": len(group),
+            "seeds": [result.get("seed") for result in group if "seed" in result],
+            "params": first.get("params"),
+            "average_width": first.get("average_width"),
+            "square_sum": first.get("square_sum"),
+            "target_square_sum": first.get("target_square_sum"),
+            "widths": first.get("widths", []),
+            "efficiency": first.get("efficiency", {}),
+        }
+        for field in aggregate_fields:
+            values = [number(result, field, math.nan) for result in group if field in result]
+            values = [value for value in values if not math.isnan(value)]
+            if values:
+                row[field] = sum(values) / len(values)
+        rows[name] = row
+    return rows
+
+
+def normalize_summary_metrics(summary: Mapping[str, Any]) -> Mapping[str, Any]:
+    normalized = dict(summary)
+    aliases = {
+        "val_loss": "val_loss_mean",
+        "best_val_loss": "best_val_loss_mean",
+        "tokens_per_sec": "tokens_per_sec_mean",
+    }
+    for target, source in aliases.items():
+        if target not in normalized and source in normalized:
+            normalized[target] = normalized[source]
+    return normalized
+
+
+def merge_summary_with_representative(
+    summary: Mapping[str, Any],
+    representative: Optional[Mapping[str, Any]],
+) -> Mapping[str, Any]:
+    merged = dict(representative or {})
+    merged.update(summary)
+    merged["generation"] = (representative or {}).get("generation", "")
+    merged["history"] = (representative or {}).get("history", [])
+    return merged
 
 
 def render_blog(
@@ -80,6 +177,7 @@ def render_blog(
     args = report.get("args", {})
     data = report.get("data", {})
     seed_protocol = report.get("seed_protocol", {})
+    seed_protocols = report.get("seed_protocols", [])
     created_at = str(report.get("created_at", "unknown"))
     steps = int(args.get("steps", latest_step(constant, variable)))
     total_tokens = int(data.get("total_tokens", 0))
@@ -97,9 +195,11 @@ def render_blog(
     else:
         val_sentence = "Both models finished with the same validation loss."
 
+    seed_line = format_seed_line(seed_protocol, seed_protocols)
+
     return f"""# {title}
 
-Generated from `{html_escape(str(report.get("args", {}).get("report_path", "runs/last_run.json")))}` at {created_at}.
+Generated from `{html_escape(str(report.get("_source_report_path", report.get("args", {}).get("report_path", "runs/last_run.json"))))}` at {created_at}.
 
 This is a byte-level local benchmark, not a reproduction-scale language-model result. The bundled corpus is {total_tokens:,} bytes, the run uses {steps:,} training steps, and the comparison is most useful as a controlled local comparison of these two implementations.
 
@@ -107,7 +207,7 @@ This is a byte-level local benchmark, not a reproduction-scale language-model re
 
 - Constant model widths: `{format_widths(constant)}`
 - Variable model widths: `{format_widths(variable)}`
-- Seed protocol: model `{seed_protocol.get("model_seed", "n/a")}`, train batches `{seed_protocol.get("train_batch_seed", "n/a")}`, eval batches `{seed_protocol.get("eval_batch_seed", "n/a")}`, sampling `{seed_protocol.get("sampling_seed", "n/a")}`
+- Seed protocol: {seed_line}
 - Training setup: layers `{args.get("layers", "n/a")}`, base width `{args.get("width", "n/a")}`, heads `{args.get("heads", "n/a")}`, block size `{args.get("block_size", "n/a")}`, batch size `{args.get("batch_size", "n/a")}`
 
 ## Results
@@ -118,6 +218,8 @@ This is a byte-level local benchmark, not a reproduction-scale language-model re
 {metric_row(variable)}
 
 The variable-width run used {format_signed_pct(param_delta)} parameters, {format_signed_pct(square_delta)} `sum(width^2)`, and {format_signed_pct(speed_delta)} throughput relative to the constant baseline. {val_sentence} Its perplexity changed by {format_signed_pct(ppl_delta)}.
+
+If this report contains multiple seeds, the table uses aggregate means while the learning-curve chart uses the first representative run.
 
 ![Width schedule comparison](widths_animation.svg)
 
@@ -585,6 +687,18 @@ def html_metric_row(result: Mapping[str, Any]) -> str:
 
 def format_widths(result: Mapping[str, Any]) -> str:
     return "[" + ", ".join(str(int(width)) for width in result.get("widths", [])) + "]"
+
+
+def format_seed_line(seed_protocol: Mapping[str, Any], seed_protocols: Sequence[Mapping[str, Any]]) -> str:
+    if seed_protocols:
+        model_seeds = [str(protocol.get("model_seed", "n/a")) for protocol in seed_protocols]
+        return f"model seeds `{', '.join(model_seeds)}` with paired train/eval/sampling offsets"
+    return (
+        f"model `{seed_protocol.get('model_seed', 'n/a')}`, "
+        f"train batches `{seed_protocol.get('train_batch_seed', 'n/a')}`, "
+        f"eval batches `{seed_protocol.get('eval_batch_seed', 'n/a')}`, "
+        f"sampling `{seed_protocol.get('sampling_seed', 'n/a')}`"
+    )
 
 
 def latest_step(*results: Mapping[str, Any]) -> int:

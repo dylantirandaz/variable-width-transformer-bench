@@ -1,9 +1,14 @@
-.PHONY: setup benchmark replicated-benchmark shape-sweep artifacts test
+.PHONY: setup setup-modal benchmark replicated-benchmark shape-sweep modal-replicated modal-shape-sweep artifacts test
 PYTHON ?= .venv/bin/python
+MODAL ?= .venv/bin/modal
 
 setup:
 	python3 -m venv .venv
 	$(PYTHON) -m pip install -r requirements.txt
+
+setup-modal:
+	$(PYTHON) -m pip install -r requirements-modal.txt
+	$(MODAL) setup
 
 benchmark:
 	PYTHONPATH=src $(PYTHON) -m vwt_bench.benchmark \
@@ -47,6 +52,12 @@ shape-sweep:
 		--block-size 96 \
 		--generate-tokens 240 \
 		--report-path runs/shape_sweep.json
+
+modal-replicated:
+	$(MODAL) run scripts/modal_benchmark.py --mode replicated
+
+modal-shape-sweep:
+	$(MODAL) run scripts/modal_benchmark.py --mode shape-sweep
 
 artifacts:
 	PYTHONPATH=src $(PYTHON) scripts/build_artifacts.py --report runs/last_run.json --out-dir runs/artifacts
