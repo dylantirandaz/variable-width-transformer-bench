@@ -1,4 +1,4 @@
-.PHONY: setup setup-modal benchmark replicated-benchmark shape-sweep modal-replicated modal-shape-sweep artifacts test
+.PHONY: setup setup-modal corpus benchmark replicated-benchmark shape-sweep modal-replicated modal-shape-sweep modal-white-nights artifacts test
 PYTHON ?= .venv/bin/python
 MODAL ?= .venv/bin/modal
 
@@ -9,6 +9,9 @@ setup:
 setup-modal:
 	$(PYTHON) -m pip install -r requirements-modal.txt
 	$(MODAL) setup
+
+corpus:
+	$(PYTHON) scripts/fetch_white_nights.py
 
 benchmark:
 	PYTHONPATH=src $(PYTHON) -m vwt_bench.benchmark \
@@ -58,6 +61,9 @@ modal-replicated:
 
 modal-shape-sweep:
 	$(MODAL) run scripts/modal_benchmark.py --mode shape-sweep
+
+modal-white-nights:
+	$(MODAL) run scripts/modal_benchmark.py --mode white-nights-replicated
 
 artifacts:
 	PYTHONPATH=src $(PYTHON) scripts/build_artifacts.py --report runs/last_run.json --out-dir runs/artifacts

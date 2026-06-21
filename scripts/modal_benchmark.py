@@ -4,6 +4,7 @@
 Usage:
     modal run scripts/modal_benchmark.py --mode replicated
     modal run scripts/modal_benchmark.py --mode shape-sweep
+    modal run scripts/modal_benchmark.py --mode white-nights-replicated
 """
 
 from __future__ import annotations
@@ -70,6 +71,45 @@ def run_remote(mode: str = "replicated") -> dict:
 
 
 def benchmark_command(mode: str, report_path: Path) -> list[str]:
+    if mode == "white-nights-replicated":
+        return [
+            sys.executable,
+            "-m",
+            "vwt_bench.benchmark",
+            "--device",
+            "cuda",
+            "--precision",
+            "bf16",
+            "--steps",
+            "1000",
+            "--eval-iters",
+            "16",
+            "--eval-interval",
+            "200",
+            "--history-interval",
+            "10",
+            "--log-interval",
+            "50",
+            "--seeds",
+            "1337,2027,3141",
+            "--layers",
+            "16",
+            "--width",
+            "640",
+            "--heads",
+            "16",
+            "--batch-size",
+            "16",
+            "--block-size",
+            "512",
+            "--generate-tokens",
+            "400",
+            "--prompt",
+            "It was a wonderful night,",
+            "--report-path",
+            str(report_path),
+        ]
+
     common = [
         sys.executable,
         "-m",
@@ -103,7 +143,7 @@ def benchmark_command(mode: str, report_path: Path) -> list[str]:
         return common + ["--seeds", "1337,2027,3141"]
     if mode == "shape-sweep":
         return common + ["--variable-shapes", "x,diamond,increasing,decreasing"]
-    raise ValueError("mode must be 'replicated' or 'shape-sweep'")
+    raise ValueError("mode must be 'replicated', 'shape-sweep', or 'white-nights-replicated'")
 
 
 def run(cmd: list[str]) -> None:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+from contextlib import nullcontext
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 import json
@@ -47,6 +48,7 @@ class Result:
 def main() -> None:
     args = parse_args()
     device = select_device(args.device)
+    validate_precision(args, device)
     torch.manual_seed(args.seed)
 
     data = load_bytes(args.data_path)
@@ -108,6 +110,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dropout", type=float, default=0.0)
     parser.add_argument("--mlp-expansion", type=int, default=4)
     parser.add_argument("--position-encoding", default="rope", choices=["rope", "learned"])
+    parser.add_argument("--precision", default="fp32", choices=["fp32", "bf16"])
     parser.add_argument("--rope-base", type=float, default=10_000.0)
     parser.add_argument("--init-std", type=float, default=0.02)
     parser.add_argument("--disable-width-aware-init", action="store_true")
@@ -140,6 +143,17 @@ def select_device(choice: str) -> torch.device:
     if choice == "mps" and not (hasattr(torch.backends, "mps") and torch.backends.mps.is_available()):
         raise RuntimeError("MPS was requested but is not available")
     return torch.device(choice)
+
+
+def validate_precision(args: argparse.Namespace, device: torch.device) -> None:
+    if args.precision == "bf16" and device.type != "cuda":
+        raise RuntimeError("--precision bf16 is currently only enabled for CUDA runs")
+
+
+def precision_context(args: argparse.Namespace, device: torch.device):
+    if args.precision == "bf16":
+        return torch.autocast(device_type=device.type, dtype=torch.bfloat16)
+    return nullcontext()
 
 
 def print_schedule(name: str, schedule: WidthSchedule) -> None:
@@ -259,7 +273,8 @@ def run_one(
         for group in optimizer.param_groups:
             group["lr"] = lr
         x, y = get_batch(train_data, args.batch_size, args.block_size, device, batch_generator)
-        _, loss = model(x, y)
+        with precision_context(args, device):
+            _, loss = model(x, y)
         optimizer.zero_grad(set_to_none=True)
         loss.backward()
         if args.grad_clip > 0:
@@ -387,7 +402,8 @@ def estimate_loss(
     generator = torch.Generator().manual_seed(seed)
     for _ in range(args.eval_iters):
         x, y = get_batch(data, args.batch_size, args.block_size, device, generator)
-        _, loss = model(x, y)
+        with precision_context(args, device):
+            _, loss = model(x, y)
         losses.append(float(loss.item()))
     model.train()
     return sum(losses) / len(losses)
@@ -446,13 +462,15 @@ def analyze_representations(
     accum: list[dict[str, float]] = []
     for _ in range(args.analysis_iters):
         x, y = get_batch(data, args.batch_size, args.block_size, device, generator)
-        _, _, diagnostics = model(x, y, return_diagnostics=True)
+        with precision_context(args, device):
+            _, _, diagnostics = model(x, y, return_diagnostics=True)
         hidden_states = diagnostics["hidden_states"]
         for layer_idx, hidden in enumerate(hidden_states):
             metrics = representation_metrics(hidden)
             resized = resize_residual(hidden, model.base_width, reversed(hidden_states[:layer_idx]))
-            logits = model.lm_head(resized)
-            lens_loss = F.cross_entropy(logits.reshape(-1, logits.size(-1)), y.reshape(-1))
+            with precision_context(args, device):
+                logits = model.lm_head(resized)
+                lens_loss = F.cross_entropy(logits.reshape(-1, logits.size(-1)), y.reshape(-1))
             accum.append(
                 {
                     "layer": float(layer_idx),
@@ -510,13 +528,14 @@ def generate_text(
         generator = torch.Generator().manual_seed(seed)
     else:
         generator = None
-    out = model.generate(
-        prompt,
-        max_new_tokens=args.generate_tokens,
-        temperature=args.temperature,
-        top_k=args.top_k,
-        generator=generator,
-    )
+    with precision_context(args, device):
+        out = model.generate(
+            prompt,
+            max_new_tokens=args.generate_tokens,
+            temperature=args.temperature,
+            top_k=args.top_k,
+            generator=generator,
+        )
     return decode(out[0].detach().cpu().tolist())
 
 

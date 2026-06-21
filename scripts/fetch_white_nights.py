@@ -46,6 +46,9 @@ def extract_white_nights(html: str) -> str:
     start = html.find(START_MARKER)
     if start < 0:
         raise ValueError(f"could not find start marker {START_MARKER!r}")
+    start = html.rfind("<p", 0, start)
+    if start < 0:
+        raise ValueError("could not find containing paragraph for story title")
     end = html.find(END_MARKER, start)
     if end < 0:
         raise ValueError(f"could not find end marker {END_MARKER!r}")
