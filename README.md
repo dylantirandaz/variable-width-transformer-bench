@@ -90,10 +90,18 @@ make shape-sweep
 That compares X, diamond, increasing, and decreasing geometric schedules against
 the constant-width baseline.
 
-The default corpus in `data/tiny_corpus.txt` is the *White Nights* text used by
-this benchmark. It is soft-wrapped for readability; the default loader unwraps
-single line breaks and preserves blank-line paragraph breaks before byte
-tokenization. Use your own UTF-8 text file with:
+The default corpus in `data/tiny_corpus.txt` is the full *White Nights* story
+from Project Gutenberg's `White Nights and Other Stories` HTML edition:
+
+```bash
+make corpus
+```
+
+The extractor is [scripts/fetch_white_nights.py](scripts/fetch_white_nights.py).
+It keeps the `WHITE NIGHTS` story section and stops before `NOTES FROM
+UNDERGROUND`. The default loader unwraps single line breaks and preserves
+blank-line paragraph breaks before byte tokenization. Use your own UTF-8 text
+file with:
 
 ```bash
 PYTHONPATH=src python -m vwt_bench.benchmark --data-path /path/to/text.txt
@@ -122,6 +130,16 @@ For a GPU shape sweep:
 ```bash
 make modal-shape-sweep
 ```
+
+For the larger full-story run that is closer to the paper's smallest dense
+architecture shape, use:
+
+```bash
+make modal-white-nights
+```
+
+That mode uses the full bundled story, CUDA bf16 autocast, 16 layers, width 640,
+16 heads, 512-byte context, 1,000 training steps, and three replicated seeds.
 
 The Modal launcher is [scripts/modal_benchmark.py](scripts/modal_benchmark.py).
 It uses an A100 function by default, writes reports to a persistent Modal Volume
