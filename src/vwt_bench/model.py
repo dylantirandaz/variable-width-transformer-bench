@@ -243,7 +243,8 @@ class TinyTransformerLM(nn.Module):
         self,
         input_ids: torch.Tensor,
         targets: Optional[torch.Tensor] = None,
-    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+        return_diagnostics: bool = False,
+    ) -> tuple[torch.Tensor, Optional[torch.Tensor]] | tuple[torch.Tensor, Optional[torch.Tensor], dict[str, List[torch.Tensor]]]:
         batch, steps = input_ids.shape
         if steps > self.block_size:
             raise ValueError(f"sequence length {steps} exceeds block_size {self.block_size}")
@@ -267,6 +268,8 @@ class TinyTransformerLM(nn.Module):
         loss = None
         if targets is not None:
             loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.reshape(-1))
+        if return_diagnostics:
+            return logits, loss, {"hidden_states": histories}
         return logits, loss
 
     @torch.no_grad()
