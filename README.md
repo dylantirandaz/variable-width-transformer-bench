@@ -15,7 +15,7 @@ middle layers, and uses parameter-free residual resizing:
   actively processed that coordinate;
 - missing coordinates are padded with zeros.
 
-This repo implements a tiny byte-level language-model benchmark so the two
+This repo implements a local byte-level language-model benchmark so the two
 architectures can train and generate side by side on a laptop. It is not a
 reproduction of the paper's DCLM-scale experiments.
 
@@ -28,16 +28,26 @@ python3 -m venv .venv
 pip install -r requirements.txt
 ```
 
-## Quick Run
+## Benchmark Run
 
 ```bash
-make quick
+make benchmark
 ```
 
 Equivalent command:
 
 ```bash
-PYTHONPATH=src python -m vwt_bench.benchmark --steps 80 --eval-iters 8 --batch-size 16
+PYTHONPATH=src python -m vwt_bench.benchmark \
+  --steps 500 \
+  --eval-iters 16 \
+  --eval-interval 100 \
+  --history-interval 5 \
+  --layers 6 \
+  --width 96 \
+  --heads 4 \
+  --batch-size 32 \
+  --block-size 96 \
+  --generate-tokens 240
 ```
 
 The script prints:
@@ -53,33 +63,11 @@ The script prints:
 
 By default, the JSON report is written to `runs/last_run.json`.
 
-## Larger Local Run
-
-```bash
-PYTHONPATH=src python -m vwt_bench.benchmark \
-  --steps 500 \
-  --layers 6 \
-  --width 96 \
-  --heads 4 \
-  --batch-size 32 \
-  --block-size 96 \
-  --generate-tokens 240
-```
-
 The default corpus in `data/tiny_corpus.txt` is the *White Nights* text used by
 this benchmark. Use your own UTF-8 text file with:
 
 ```bash
 PYTHONPATH=src python -m vwt_bench.benchmark --data-path /path/to/text.txt
-```
-
-For validation-loss checkpoints during training, add `--eval-interval`:
-
-```bash
-PYTHONPATH=src python -m vwt_bench.benchmark \
-  --steps 500 \
-  --eval-interval 100 \
-  --history-interval 5
 ```
 
 The default corpus is small, so bundled results should be treated as a local
