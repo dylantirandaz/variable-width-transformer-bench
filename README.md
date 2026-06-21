@@ -70,6 +70,26 @@ The script prints:
 
 By default, the JSON report is written to `runs/last_run.json`.
 
+For the main hypothesis test, run multiple seeds:
+
+```bash
+make replicated-benchmark
+```
+
+That writes `runs/replicated_benchmark.json` with per-seed results, aggregate
+means/standard deviations, pairwise deltas against the constant-width baseline,
+efficiency proxies, representation participation-ratio diagnostics, and
+logit-lens losses.
+
+For a paper-style schedule ablation, run:
+
+```bash
+make shape-sweep
+```
+
+That compares X, diamond, increasing, and decreasing geometric schedules against
+the constant-width baseline.
+
 The default corpus in `data/tiny_corpus.txt` is the *White Nights* text used by
 this benchmark. It is soft-wrapped for readability; the default loader unwraps
 single line breaks and preserves blank-line paragraph breaks before byte
@@ -82,6 +102,11 @@ PYTHONPATH=src python -m vwt_bench.benchmark --data-path /path/to/text.txt
 The default corpus is small, so bundled results should be treated as a local
 comparison rather than a scaling claim. Use a larger corpus and multiple seeds
 before making a performance claim.
+
+The paper's published experiments use DCLM-scale data, 4096-token sequences,
+200M-2B dense models, a 3B/1B-active MoE model, and multi-GPU training. This
+repo follows the architecture and measurement methodology locally; it is not a
+drop-in replacement for that compute budget.
 
 ## Tests
 
