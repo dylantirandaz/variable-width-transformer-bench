@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import asdict, dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 import json
 import math
 from pathlib import Path
 import textwrap
 import time
-from typing import Optional
+from typing import Any, Optional
 
 import torch
 
@@ -30,7 +30,10 @@ class Result:
     final_train_loss: float
     val_loss: float
     val_ppl: float
+    best_val_loss: float
+    train_seconds: float
     tokens_per_sec: float
+    history: list[dict[str, float]]
     generation: str
 
 
@@ -59,12 +62,13 @@ def main() -> None:
     print_schedule("variable", variable_schedule)
     print()
 
-    constant = run_one("constant", constant_schedule, args, train_data, val_data, device, seed_offset=0)
-    variable = run_one("variable", variable_schedule, args, train_data, val_data, device, seed_offset=1)
+    print_seed_protocol(args.seed)
+    constant = run_one("constant", constant_schedule, args, train_data, val_data, device)
+    variable = run_one("variable", variable_schedule, args, train_data, val_data, device)
 
     print_summary([constant, variable])
     print_generations(constant.generation, variable.generation)
-    write_report(args.report_path, args, constant, variable)
+    write_report(args.report_path, args, train_data, val_data, device, constant, variable)
 
 
 def parse_args() -> argparse.Namespace:
@@ -80,6 +84,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--steps", type=int, default=200)
     parser.add_argument("--eval-iters", type=int, default=16)
+    parser.add_argument("--eval-interval", type=int, default=0, help="Also estimate validation loss every N train steps.")
+    parser.add_argument("--history-interval", type=int, default=1, help="Record train-curve history every N steps.")
     parser.add_argument("--val-fraction", type=float, default=0.10)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--weight-decay", type=float, default=0.05)
@@ -125,6 +131,16 @@ def print_schedule(name: str, schedule: WidthSchedule) -> None:
         )
 
 
+def print_seed_protocol(seed: int) -> None:
+    print(
+        "seeds: "
+        f"model={seed} "
+        f"train_batches={seed + 10_000} "
+        f"eval_batches={seed + 20_000} "
+        f"sampling={seed + 30_000}"
+    )
+
+
 def run_one(
     name: str,
     schedule: WidthSchedule,
@@ -132,7 +148,6 @@ def run_one(
     train_data: torch.Tensor,
     val_data: torch.Tensor,
     device: torch.device,
-    seed_offset: int,
 ) -> Result:
     torch.manual_seed(args.seed)
     model = TinyTransformerLM(
@@ -151,6 +166,10 @@ def run_one(
     model.train()
     last_loss = float("nan")
     tokens_seen = 0
+    eval_seconds = 0.0
+    history: list[dict[str, float]] = []
+    final_val_loss: Optional[float] = None
+    synchronize_device(device)
     start = time.perf_counter()
     for step in range(1, args.steps + 1):
         x, y = get_batch(train_data, args.batch_size, args.block_size, device, batch_generator)
@@ -163,13 +182,85 @@ def run_one(
         last_loss = float(loss.item())
         tokens_seen += args.batch_size * args.block_size
 
-        if args.log_interval > 0 and (step == 1 or step % args.log_interval == 0 or step == args.steps):
-            elapsed = max(time.perf_counter() - start, 1e-9)
-            print(f"{name:>8} step={step:04d}/{args.steps} loss={last_loss:.4f} tok/s={tokens_seen / elapsed:.0f}")
+        should_log = args.log_interval > 0 and (step == 1 or step % args.log_interval == 0 or step == args.steps)
+        should_eval = args.eval_interval > 0 and (step % args.eval_interval == 0 or step == args.steps)
+        should_record = step == 1 or step == args.steps or (
+            args.history_interval > 0 and step % args.history_interval == 0
+        )
+        entry: Optional[dict[str, float]] = None
 
-    elapsed = max(time.perf_counter() - start, 1e-9)
-    val_loss = estimate_loss(model, val_data, args, device)
-    generation = generate_text(model, args, device, seed_offset)
+        if should_log or should_record or should_eval:
+            elapsed = elapsed_train_seconds(start, eval_seconds, device)
+            entry = {
+                "step": float(step),
+                "tokens": float(tokens_seen),
+                "seconds": elapsed,
+                "train_loss": last_loss,
+                "tokens_per_sec": tokens_seen / elapsed,
+            }
+
+        if should_eval:
+            eval_start = time.perf_counter()
+            val_loss = estimate_loss(model, val_data, args, device, seed=args.seed + 20_000)
+            synchronize_device(device)
+            eval_seconds += time.perf_counter() - eval_start
+            final_val_loss = val_loss
+            if entry is None:
+                elapsed = elapsed_train_seconds(start, eval_seconds, device)
+                entry = {
+                    "step": float(step),
+                    "tokens": float(tokens_seen),
+                    "seconds": elapsed,
+                    "train_loss": last_loss,
+                    "tokens_per_sec": tokens_seen / elapsed,
+                }
+            entry["val_loss"] = val_loss
+            entry["val_ppl"] = math.exp(min(val_loss, 20.0))
+
+        if entry is not None and (should_record or should_eval):
+            history.append(entry)
+
+        if should_log:
+            val_part = f" val={entry['val_loss']:.4f}" if entry is not None and "val_loss" in entry else ""
+            print(
+                f"{name:>8} step={step:04d}/{args.steps} "
+                f"loss={last_loss:.4f}{val_part} tok/s={entry['tokens_per_sec']:.0f}"
+            )
+
+    train_seconds = elapsed_train_seconds(start, eval_seconds, device)
+    if final_val_loss is None:
+        final_val_loss = estimate_loss(model, val_data, args, device, seed=args.seed + 20_000)
+    val_loss = final_val_loss
+    if history:
+        if int(history[-1]["step"]) == args.steps:
+            history[-1]["val_loss"] = val_loss
+            history[-1]["val_ppl"] = math.exp(min(val_loss, 20.0))
+        else:
+            history.append(
+                {
+                    "step": float(args.steps),
+                    "tokens": float(tokens_seen),
+                    "seconds": train_seconds,
+                    "train_loss": last_loss,
+                    "tokens_per_sec": tokens_seen / train_seconds,
+                    "val_loss": val_loss,
+                    "val_ppl": math.exp(min(val_loss, 20.0)),
+                }
+            )
+    else:
+        history.append(
+            {
+                "step": float(args.steps),
+                "tokens": float(tokens_seen),
+                "seconds": train_seconds,
+                "train_loss": last_loss,
+                "tokens_per_sec": tokens_seen / train_seconds,
+                "val_loss": val_loss,
+                "val_ppl": math.exp(min(val_loss, 20.0)),
+            }
+        )
+    best_val_loss = min(entry["val_loss"] for entry in history if "val_loss" in entry)
+    generation = generate_text(model, args, device, seed=args.seed + 30_000)
     return Result(
         name=name,
         widths=schedule.widths,
@@ -180,7 +271,10 @@ def run_one(
         final_train_loss=last_loss,
         val_loss=val_loss,
         val_ppl=math.exp(min(val_loss, 20.0)),
-        tokens_per_sec=tokens_seen / elapsed,
+        best_val_loss=best_val_loss,
+        train_seconds=train_seconds,
+        tokens_per_sec=tokens_seen / train_seconds,
+        history=history,
         generation=generation,
     )
 
@@ -191,10 +285,11 @@ def estimate_loss(
     data: torch.Tensor,
     args: argparse.Namespace,
     device: torch.device,
+    seed: int,
 ) -> float:
     model.eval()
     losses = []
-    generator = torch.Generator().manual_seed(args.seed + 20_000)
+    generator = torch.Generator().manual_seed(seed)
     for _ in range(args.eval_iters):
         x, y = get_batch(data, args.batch_size, args.block_size, device, generator)
         _, loss = model(x, y)
@@ -208,14 +303,14 @@ def generate_text(
     model: TinyTransformerLM,
     args: argparse.Namespace,
     device: torch.device,
-    seed_offset: int,
+    seed: int,
 ) -> str:
     model.eval()
-    torch.manual_seed(args.seed + 30_000 + seed_offset)
+    torch.manual_seed(seed)
     prompt = torch.tensor([encode(args.prompt)], dtype=torch.long, device=device)
     generator: Optional[torch.Generator]
     if device.type == "cpu":
-        generator = torch.Generator().manual_seed(args.seed + 30_000 + seed_offset)
+        generator = torch.Generator().manual_seed(seed)
     else:
         generator = None
     out = model.generate(
@@ -230,7 +325,10 @@ def generate_text(
 
 def print_summary(results: list[Result]) -> None:
     print("\nsummary")
-    header = f"{'model':<10} {'params':>10} {'avg_w':>8} {'sum_w2':>10} {'tok/s':>9} {'train':>8} {'val':>8} {'ppl':>8}"
+    header = (
+        f"{'model':<10} {'params':>10} {'avg_w':>8} {'sum_w2':>10} "
+        f"{'tok/s':>9} {'train':>8} {'val':>8} {'best':>8} {'ppl':>8}"
+    )
     print(header)
     print("-" * len(header))
     for result in results:
@@ -242,6 +340,7 @@ def print_summary(results: list[Result]) -> None:
             f"{result.tokens_per_sec:>9.0f} "
             f"{result.final_train_loss:>8.4f} "
             f"{result.val_loss:>8.4f} "
+            f"{result.best_val_loss:>8.4f} "
             f"{result.val_ppl:>8.2f}"
         )
 
@@ -260,18 +359,59 @@ def print_generations(constant: str, variable: str) -> None:
         print(f"{left:<{width}} | {right}")
 
 
-def write_report(path: str, args: argparse.Namespace, constant: Result, variable: Result) -> None:
+def write_report(
+    path: str,
+    args: argparse.Namespace,
+    train_data: torch.Tensor,
+    val_data: torch.Tensor,
+    device: torch.device,
+    constant: Result,
+    variable: Result,
+) -> None:
     if not path:
         return
     report_path = Path(path)
     report_path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
-        "created_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+        "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
         "args": vars(args),
+        "metadata": runtime_metadata(device),
+        "data": {
+            "train_tokens": int(len(train_data)),
+            "val_tokens": int(len(val_data)),
+            "total_tokens": int(len(train_data) + len(val_data)),
+        },
+        "seed_protocol": {
+            "model_seed": args.seed,
+            "train_batch_seed": args.seed + 10_000,
+            "eval_batch_seed": args.seed + 20_000,
+            "sampling_seed": args.seed + 30_000,
+        },
         "results": [asdict(constant), asdict(variable)],
     }
     report_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     print(f"\nreport: {report_path}")
+
+
+def elapsed_train_seconds(start: float, eval_seconds: float, device: torch.device) -> float:
+    synchronize_device(device)
+    return max(time.perf_counter() - start - eval_seconds, 1e-9)
+
+
+def synchronize_device(device: torch.device) -> None:
+    if device.type == "cuda":
+        torch.cuda.synchronize(device)
+    elif device.type == "mps" and hasattr(torch, "mps") and hasattr(torch.mps, "synchronize"):
+        torch.mps.synchronize()
+
+
+def runtime_metadata(device: torch.device) -> dict[str, Any]:
+    return {
+        "torch_version": torch.__version__,
+        "device": str(device),
+        "cuda_available": torch.cuda.is_available(),
+        "mps_available": bool(hasattr(torch.backends, "mps") and torch.backends.mps.is_available()),
+    }
 
 
 if __name__ == "__main__":
