@@ -83,11 +83,10 @@ def main() -> None:
     ).to(device)
 
     if dist_state["distributed"]:
-        model_for_train = DistributedDataParallel(
-            model,
-            device_ids=[device.index],
-            gradient_as_bucket_view=True,
-        )
+        ddp_kwargs: dict[str, Any] = {"gradient_as_bucket_view": True}
+        if device.type == "cuda":
+            ddp_kwargs["device_ids"] = [device.index]
+        model_for_train = DistributedDataParallel(model, **ddp_kwargs)
     else:
         model_for_train = model
 
@@ -243,7 +242,7 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Resume model and optimizer state from a checkpoint path.",
     )
-    parser.add_argument("--device", default="cuda", choices=["cuda", "cpu"])
+    parser.add_argument("--device", default="cuda", choices=["cuda", "cpu", "mps"])
     parser.add_argument("--precision", default="bf16", choices=["bf16", "fp32"])
     parser.add_argument("--seed", type=int, default=1337)
     parser.add_argument("--steps", type=int, default=None)
@@ -343,6 +342,10 @@ def select_device(choice: str, local_rank: int) -> torch.device:
             raise RuntimeError("CUDA was requested but is not available")
         torch.cuda.set_device(local_rank)
         return torch.device("cuda", local_rank)
+    if choice == "mps":
+        if not (hasattr(torch.backends, "mps") and torch.backends.mps.is_available()):
+            raise RuntimeError("MPS was requested but is not available")
+        return torch.device("mps")
     return torch.device("cpu")
 
 
@@ -399,6 +402,8 @@ def distributed_average(value: float, device: torch.device, distributed: bool) -
 def elapsed_seconds(started: float, device: torch.device) -> float:
     if device.type == "cuda":
         torch.cuda.synchronize(device)
+    elif device.type == "mps":
+        torch.mps.synchronize()
     return max(time.perf_counter() - started, 1e-9)
 
 

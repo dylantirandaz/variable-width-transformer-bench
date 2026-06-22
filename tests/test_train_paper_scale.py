@@ -77,3 +77,28 @@ def test_validate_runtime_rejects_nonpositive_loss_sample_interval() -> None:
         assert "--loss-sample-interval" in str(exc)
     else:
         raise AssertionError("expected invalid loss sample interval to fail")
+
+
+def test_validate_runtime_rejects_bf16_on_mps() -> None:
+    args = argparse.Namespace(
+        precision="bf16",
+        device="mps",
+        tokens_per_step=8,
+        sequence_length=4,
+        micro_batch_size=1,
+        gradient_accumulation_steps=2,
+        sequences_per_step=2,
+        allow_batch_rescale=False,
+        steps=10,
+        checkpoint_interval=0,
+        keep_checkpoints=2,
+        loss_sample_interval=1,
+    )
+
+    try:
+        validate_runtime(args, {"world_size": 1})
+    except RuntimeError as exc:
+        assert "bf16" in str(exc)
+        assert "CUDA" in str(exc)
+    else:
+        raise AssertionError("expected bf16 MPS run to fail")
