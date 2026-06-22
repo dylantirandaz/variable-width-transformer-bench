@@ -185,8 +185,23 @@ def main(
     checkpoint_at_end: bool = True,
     keep_checkpoints: int = 2,
     resume: bool = True,
+    wait: bool = False,
 ) -> None:
-    result = run_paper_scale.remote(
+    kwargs = {
+        "scale": scale,
+        "model_kind": model_kind,
+        "train_bin": train_bin,
+        "checkpoint_interval": checkpoint_interval,
+        "checkpoint_at_end": checkpoint_at_end,
+        "keep_checkpoints": keep_checkpoints,
+        "resume": resume,
+    }
+    if wait:
+        result = run_paper_scale.remote(**kwargs)
+        print(json.dumps(result, indent=2))
+        return
+
+    function_call = run_paper_scale.spawn(
         scale=scale,
         model_kind=model_kind,
         train_bin=train_bin,
@@ -195,4 +210,17 @@ def main(
         keep_checkpoints=keep_checkpoints,
         resume=resume,
     )
-    print(json.dumps(result, indent=2))
+    print(
+        json.dumps(
+            {
+                "status": "spawned",
+                "function_call_id": function_call.object_id,
+                "scale": scale,
+                "model_kind": model_kind,
+                "checkpoint_interval": checkpoint_interval,
+                "keep_checkpoints": keep_checkpoints,
+                "resume": resume,
+            },
+            indent=2,
+        )
+    )
