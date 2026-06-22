@@ -23,11 +23,17 @@ import json
 import os
 from pathlib import Path
 import re
+import sys
 import time
 from typing import Any
 
 import torch
 from torch.nn.parallel import DistributedDataParallel
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+SRC_ROOT = REPO_ROOT / "src"
+if str(SRC_ROOT) not in sys.path:
+    sys.path.insert(0, str(SRC_ROOT))
 
 from vwt_bench.model import TinyTransformerLM, count_parameters
 from vwt_bench.paper_scale import PAPER_DENSE_SCALES, get_paper_scale
@@ -80,6 +86,7 @@ def main() -> None:
         width_aware_init=not args.disable_width_aware_init,
         norm=args.norm,
         attention_scale=args.attention_scale,
+        activation_checkpoint=args.activation_checkpoint,
     ).to(device)
 
     if dist_state["distributed"]:
@@ -264,6 +271,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--attention-scale", choices=["sqrt", "mup"], default=None)
     parser.add_argument("--init-std", type=float, default=None)
     parser.add_argument("--disable-width-aware-init", action="store_true")
+    parser.add_argument(
+        "--activation-checkpoint",
+        action="store_true",
+        help="Checkpoint each Transformer block to reduce activation memory.",
+    )
     parser.add_argument("--rope-base", type=float, default=10_000.0)
     parser.add_argument("--dropout", type=float, default=0.0)
     parser.add_argument("--lr", type=float, default=1e-2)

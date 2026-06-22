@@ -226,6 +226,7 @@ class TinyTransformerLM(nn.Module):
         norm: str = "layernorm",
         norm_eps: float = 1e-5,
         attention_scale: str = "sqrt",
+        activation_checkpoint: bool = False,
     ) -> None:
         super().__init__()
         if not widths:
@@ -247,6 +248,7 @@ class TinyTransformerLM(nn.Module):
         self.norm = norm
         self.norm_eps = norm_eps
         self.attention_scale = attention_scale
+        self.activation_checkpoint = activation_checkpoint
         self.token_embedding = nn.Embedding(vocab_size, base_width)
         self.position_embedding = (
             nn.Embedding(block_size, base_width) if position_encoding == "learned" else None
@@ -308,7 +310,15 @@ class TinyTransformerLM(nn.Module):
 
         for width, block in zip(self.widths, self.blocks):
             x = resize_residual(x, width, reversed(histories))
-            x = block(x)
+            if self.activation_checkpoint and x.requires_grad and torch.is_grad_enabled():
+                x = checkpoint(
+                    block,
+                    x,
+                    use_reentrant=False,
+                    preserve_rng_state=True,
+                )
+            else:
+                x = block(x)
             histories.append(x)
 
         x = self.ln_f(x)
