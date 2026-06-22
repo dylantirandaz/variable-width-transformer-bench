@@ -1,6 +1,6 @@
-.PHONY: setup setup-modal setup-scale corpus benchmark replicated-benchmark shape-sweep
+.PHONY: setup setup-modal setup-scale setup-mlx corpus benchmark replicated-benchmark shape-sweep
 .PHONY: modal-replicated modal-shape-sweep modal-white-nights modal-prepare-dclm
-.PHONY: modal-append-terminal-token modal-paper-scale modal-paper-200m artifacts test
+.PHONY: modal-append-terminal-token modal-paper-scale modal-paper-200m mlx-paper-probe artifacts test
 PYTHON ?= .venv/bin/python
 MODAL ?= .venv/bin/modal
 SCALE ?= dense_200m
@@ -45,6 +45,9 @@ setup-modal:
 
 setup-scale:
 	$(PYTHON) -m pip install -r requirements-scale.txt
+
+setup-mlx:
+	$(PYTHON) -m pip install -r requirements-mlx.txt
 
 corpus:
 	$(PYTHON) scripts/fetch_white_nights.py
@@ -114,6 +117,14 @@ modal-paper-scale:
 
 modal-paper-200m:
 	$(MAKE) modal-paper-scale SCALE=dense_200m MODEL_KIND=both
+
+mlx-paper-probe:
+	$(PYTHON) scripts/bench_mlx_paper_scale.py \
+		--scale $(SCALE) \
+		--model-kind variable \
+		--steps 8 \
+		--max-seconds 180 \
+		--report-path runs/paper_scale/mlx_probe.json
 
 artifacts:
 	PYTHONPATH=src $(PYTHON) scripts/build_artifacts.py --report runs/last_run.json --out-dir runs/artifacts

@@ -259,6 +259,36 @@ The blog draft in
 [docs/blog_dense_200m_modal_draft.md](docs/blog_dense_200m_modal_draft.md)
 is intentionally placeholder-based until both final reports exist.
 
+## Apple Silicon MLX Probe
+
+For a bounded local Apple Silicon throughput check, install MLX and run the
+single-device probe:
+
+```bash
+make setup-mlx
+make mlx-paper-probe
+```
+
+The MLX path uses the same dense model geometry, bf16 by default, RoPE, SwiGLU,
+RMSNorm, activation checkpointing, chunked vocab loss, AdamW, and the paper LR
+schedule. It is a real train/update path, but the default target is a short
+throughput probe with one 4096-token sequence per optimizer update. To match
+the `dense_200m` paper token batch on one local device, use:
+
+```bash
+.venv/bin/python scripts/bench_mlx_paper_scale.py \
+  --scale dense_200m \
+  --model-kind variable \
+  --paper-batch \
+  --steps 1 \
+  --max-seconds 900
+```
+
+With sequence length 4096 and microbatch 1, `--paper-batch` accumulates 128
+microbatches before each optimizer update. Reports include
+`matches_paper_tokens_per_step` so probe runs are not mistaken for paper-batch
+training.
+
 Checkpoint behavior:
 
 - `scripts/train_paper_scale.py` writes rank-0 checkpoints to
