@@ -253,6 +253,12 @@ and average-width deltas. The trainer refuses to silently change the official
 effective token batch when launched with the wrong world size; pass
 `--allow-batch-rescale` only for deliberate non-paper ablations.
 
+Before interpreting the dense_200M run, use the preregistered analysis plan in
+[docs/paper_scale_preregistration.md](docs/paper_scale_preregistration.md).
+The blog draft in
+[docs/blog_dense_200m_modal_draft.md](docs/blog_dense_200m_modal_draft.md)
+is intentionally placeholder-based until both final reports exist.
+
 Checkpoint behavior:
 
 - `scripts/train_paper_scale.py` writes rank-0 checkpoints to
@@ -280,4 +286,5 @@ make test
 
 The tests cover the geometric width solver, paper-style residual expansion,
 paper-scale dense configs, memmap token batching, chunked loss, and
-forward/generation shape checks.
+forward/generation shape checks. They also cover paper-scale comparison math
+and checkpoint-pruning behavior.
