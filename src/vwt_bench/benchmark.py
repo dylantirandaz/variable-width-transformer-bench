@@ -110,6 +110,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dropout", type=float, default=0.0)
     parser.add_argument("--mlp-expansion", type=int, default=4)
     parser.add_argument("--position-encoding", default="rope", choices=["rope", "learned"])
+    parser.add_argument("--norm", default="layernorm", choices=["layernorm", "rmsnorm"])
+    parser.add_argument("--attention-scale", default="sqrt", choices=["sqrt", "mup"])
     parser.add_argument("--precision", default="fp32", choices=["fp32", "bf16"])
     parser.add_argument("--rope-base", type=float, default=10_000.0)
     parser.add_argument("--init-std", type=float, default=0.02)
@@ -248,6 +250,8 @@ def run_one(
         rope_base=args.rope_base,
         init_std=args.init_std,
         width_aware_init=not args.disable_width_aware_init,
+        norm=args.norm,
+        attention_scale=args.attention_scale,
     ).to(device)
     params = count_parameters(model)
     efficiency = estimate_efficiency(schedule, args)

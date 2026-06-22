@@ -8,6 +8,7 @@ from typing import Iterable, List, Optional
 import torch
 from torch import nn
 import torch.nn.functional as F
+from torch.utils.checkpoint import checkpoint
 
 
 def count_parameters(model: nn.Module) -> int:
@@ -65,22 +66,25 @@ class CausalSelfAttention(nn.Module):
         dropout: float = 0.0,
         position_encoding: str = "rope",
         rope_base: float = 10_000.0,
+        attention_scale: str = "sqrt",
     ) -> None:
         super().__init__()
         if width % heads != 0:
             raise ValueError(f"width {width} must be divisible by heads {heads}")
         if position_encoding not in {"rope", "learned"}:
             raise ValueError("position_encoding must be 'rope' or 'learned'")
+        if attention_scale not in {"sqrt", "mup"}:
+            raise ValueError("attention_scale must be 'sqrt' or 'mup'")
         self.width = width
         self.heads = heads
         self.head_dim = width // heads
+        self.dropout = dropout
+        self.attention_scale = attention_scale
         self.qkv = nn.Linear(width, 3 * width, bias=False)
         self.proj = nn.Linear(width, width, bias=False)
-        self.attn_drop = nn.Dropout(dropout)
         self.resid_drop = nn.Dropout(dropout)
         self.rope = RotaryEmbedding(self.head_dim, rope_base) if position_encoding == "rope" else None
-        mask = torch.tril(torch.ones(block_size, block_size, dtype=torch.bool))
-        self.register_buffer("mask", mask.view(1, 1, block_size, block_size), persistent=False)
+        self.block_size = block_size
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         batch, steps, width = x.shape
@@ -93,11 +97,17 @@ class CausalSelfAttention(nn.Module):
         if self.rope is not None:
             q, k = self.rope(q, k)
 
-        att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(self.head_dim))
-        att = att.masked_fill(~self.mask[:, :, :steps, :steps], torch.finfo(att.dtype).min)
-        att = F.softmax(att, dim=-1)
-        att = self.attn_drop(att)
-        y = att @ v
+        # SDPA selects FlashAttention/memory-efficient kernels on CUDA when
+        # available. This is required for paper-scale 4096-token contexts.
+        scale = 1.0 / self.head_dim if self.attention_scale == "mup" else None
+        y = F.scaled_dot_product_attention(
+            q,
+            k,
+            v,
+            dropout_p=self.dropout if self.training else 0.0,
+            is_causal=True,
+            scale=scale,
+        )
         y = y.transpose(1, 2).contiguous().view(batch, steps, width)
         return self.resid_drop(self.proj(y))
 
@@ -143,6 +153,25 @@ class SwiGLU(nn.Module):
         return self.dropout(self.down(F.silu(self.gate(x)) * self.up(x)))
 
 
+class RMSNorm(nn.Module):
+    def __init__(self, width: int, eps: float = 1e-5) -> None:
+        super().__init__()
+        self.weight = nn.Parameter(torch.ones(width))
+        self.eps = eps
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        normed = x * torch.rsqrt(x.pow(2).mean(dim=-1, keepdim=True) + self.eps)
+        return normed * self.weight
+
+
+def make_norm(kind: str, width: int, eps: float = 1e-5) -> nn.Module:
+    if kind == "layernorm":
+        return nn.LayerNorm(width, eps=eps)
+    if kind == "rmsnorm":
+        return RMSNorm(width, eps=eps)
+    raise ValueError("norm must be 'layernorm' or 'rmsnorm'")
+
+
 class TransformerBlock(nn.Module):
     def __init__(
         self,
@@ -153,12 +182,23 @@ class TransformerBlock(nn.Module):
         mlp_expansion: int = 4,
         position_encoding: str = "rope",
         rope_base: float = 10_000.0,
+        norm: str = "layernorm",
+        norm_eps: float = 1e-5,
+        attention_scale: str = "sqrt",
     ) -> None:
         super().__init__()
         self.width = width
-        self.ln_1 = nn.LayerNorm(width)
-        self.attn = CausalSelfAttention(width, heads, block_size, dropout, position_encoding, rope_base)
-        self.ln_2 = nn.LayerNorm(width)
+        self.ln_1 = make_norm(norm, width, norm_eps)
+        self.attn = CausalSelfAttention(
+            width,
+            heads,
+            block_size,
+            dropout,
+            position_encoding,
+            rope_base,
+            attention_scale,
+        )
+        self.ln_2 = make_norm(norm, width, norm_eps)
         self.mlp = SwiGLU(width, mlp_expansion, dropout)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -183,6 +223,9 @@ class TinyTransformerLM(nn.Module):
         rope_base: float = 10_000.0,
         init_std: float = 0.02,
         width_aware_init: bool = True,
+        norm: str = "layernorm",
+        norm_eps: float = 1e-5,
+        attention_scale: str = "sqrt",
     ) -> None:
         super().__init__()
         if not widths:
@@ -201,6 +244,9 @@ class TinyTransformerLM(nn.Module):
         self.position_encoding = position_encoding
         self.init_std = init_std
         self.width_aware_init = width_aware_init
+        self.norm = norm
+        self.norm_eps = norm_eps
+        self.attention_scale = attention_scale
         self.token_embedding = nn.Embedding(vocab_size, base_width)
         self.position_embedding = (
             nn.Embedding(block_size, base_width) if position_encoding == "learned" else None
@@ -216,11 +262,14 @@ class TinyTransformerLM(nn.Module):
                     mlp_expansion=mlp_expansion,
                     position_encoding=position_encoding,
                     rope_base=rope_base,
+                    norm=norm,
+                    norm_eps=norm_eps,
+                    attention_scale=attention_scale,
                 )
                 for width in widths
             ]
         )
-        self.ln_f = nn.LayerNorm(widths[-1])
+        self.ln_f = make_norm(norm, widths[-1], norm_eps)
         self.lm_head = nn.Linear(base_width, vocab_size, bias=False)
         self._init_model_weights()
 
@@ -244,7 +293,8 @@ class TinyTransformerLM(nn.Module):
         input_ids: torch.Tensor,
         targets: Optional[torch.Tensor] = None,
         return_diagnostics: bool = False,
-    ) -> tuple[torch.Tensor, Optional[torch.Tensor]] | tuple[torch.Tensor, Optional[torch.Tensor], dict[str, List[torch.Tensor]]]:
+        loss_chunk_size: int = 0,
+    ) -> tuple[Optional[torch.Tensor], Optional[torch.Tensor]] | tuple[Optional[torch.Tensor], Optional[torch.Tensor], dict[str, List[torch.Tensor]]]:
         batch, steps = input_ids.shape
         if steps > self.block_size:
             raise ValueError(f"sequence length {steps} exceeds block_size {self.block_size}")
@@ -263,14 +313,54 @@ class TinyTransformerLM(nn.Module):
 
         x = self.ln_f(x)
         x = resize_residual(x, self.base_width, reversed(histories))
-        logits = self.lm_head(x)
 
         loss = None
-        if targets is not None:
-            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.reshape(-1))
+        logits = None
+        if targets is not None and loss_chunk_size > 0 and not return_diagnostics:
+            loss = self._chunked_cross_entropy(x, targets, loss_chunk_size)
+        else:
+            logits = self.lm_head(x)
+            if targets is not None:
+                loss = F.cross_entropy(logits.reshape(-1, logits.size(-1)), targets.reshape(-1))
         if return_diagnostics:
             return logits, loss, {"hidden_states": histories}
         return logits, loss
+
+    def _chunked_cross_entropy(
+        self,
+        hidden: torch.Tensor,
+        targets: torch.Tensor,
+        chunk_size: int,
+    ) -> torch.Tensor:
+        if chunk_size <= 0:
+            raise ValueError("chunk_size must be positive")
+        hidden_flat = hidden.reshape(-1, hidden.shape[-1])
+        targets_flat = targets.reshape(-1)
+        total_loss = None
+
+        def loss_for_chunk(hidden_chunk: torch.Tensor, target_chunk: torch.Tensor) -> torch.Tensor:
+            logits = F.linear(hidden_chunk, self.lm_head.weight)
+            return F.cross_entropy(logits, target_chunk, reduction="sum")
+
+        use_checkpoint = hidden_flat.requires_grad and torch.is_grad_enabled()
+        for start in range(0, hidden_flat.shape[0], chunk_size):
+            hidden_chunk = hidden_flat[start : start + chunk_size]
+            target_chunk = targets_flat[start : start + chunk_size]
+            if use_checkpoint:
+                chunk_loss = checkpoint(
+                    loss_for_chunk,
+                    hidden_chunk,
+                    target_chunk,
+                    use_reentrant=False,
+                    preserve_rng_state=False,
+                )
+            else:
+                chunk_loss = loss_for_chunk(hidden_chunk, target_chunk)
+            total_loss = chunk_loss if total_loss is None else total_loss + chunk_loss
+
+        if total_loss is None:
+            raise ValueError("targets must contain at least one token")
+        return total_loss / targets_flat.numel()
 
     @torch.no_grad()
     def generate(

@@ -34,6 +34,43 @@ def test_tiny_transformer_forward_and_generate_shapes() -> None:
     assert out.shape == (2, 5)
 
 
+def test_tiny_transformer_supports_paper_norm_and_attention_scale() -> None:
+    torch.manual_seed(123)
+    model = TinyTransformerLM(
+        vocab_size=32,
+        block_size=8,
+        base_width=16,
+        widths=[32, 16, 32],
+        heads=4,
+        norm="rmsnorm",
+        attention_scale="mup",
+        init_std=0.1,
+    )
+    x = torch.randint(0, 32, (2, 8))
+    logits, loss = model(x, x)
+    assert logits.shape == (2, 8, 32)
+    assert loss is not None
+
+
+def test_chunked_loss_matches_full_logits_loss() -> None:
+    torch.manual_seed(123)
+    model = TinyTransformerLM(
+        vocab_size=32,
+        block_size=8,
+        base_width=16,
+        widths=[24, 16, 24],
+        heads=4,
+    )
+    x = torch.randint(0, 32, (2, 8))
+    _, full_loss = model(x, x)
+    logits, chunked_loss = model(x, x, loss_chunk_size=3)
+
+    assert logits is None
+    assert full_loss is not None
+    assert chunked_loss is not None
+    assert torch.allclose(chunked_loss, full_loss, atol=1e-6)
+
+
 def test_learned_position_encoding_allows_odd_head_dim() -> None:
     model = TinyTransformerLM(
         vocab_size=32,

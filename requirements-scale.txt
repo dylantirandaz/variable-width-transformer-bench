@@ -1,0 +1,6 @@
+numpy>=1.26
+torch>=2.2
+tiktoken>=0.7
+datasets>=2.20
+modal>=1.0
+zstandard>=0.22
